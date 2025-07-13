@@ -1,0 +1,290 @@
+#!/usr/bin/env node
+
+import { FastMCP } from "fastmcp";
+import { z } from "zod";
+import { MiriDevStatusTool } from "./tools/status.js";
+import { MiriDevDeployTool } from "./tools/deploy.js";
+import { MiriDevAuthTool } from "./tools/auth.js";
+
+// MCP 서버 생성
+const server = new FastMCP({
+  name: "miridev-mcp",
+  version: "1.0.22",
+  instructions: `
+miri.dev MCP 서버는 자연어를 통해 웹사이트를 배포할 수 있는 도구입니다.
+
+주요 기능:
+1. 웹사이트 배포 - 로컬 파일을 miri.dev에 자동 배포 (로그인 불필요, 1시간 미리보기)
+2. 인증 관리 - 로그인/로그아웃 및 상태 확인  (로그인후 1일 미리보기 x 50개 사이트 제공)
+3. 배포 모니터링 - 배포 기록 및 사이트 목록 확인 (접속자 통계 BETA)
+
+사용 예시:
+- "홈페이지를 miri.dev에 배포해줘"
+- "로그인 상태를 확인해줘"
+- "최근 배포한 사이트 목록을 보여줘"
+
+배포하려면 프로젝트 폴더에 index.html 파일이 필요합니다.
+`,
+});
+
+// 도구 인스턴스 생성
+const statusTool = new MiriDevStatusTool();
+const deployTool = new MiriDevDeployTool();
+const authTool = new MiriDevAuthTool();
+
+// 🛠️ 웹사이트 배포 도구 (실제 배포 수행)
+server.addTool({
+  name: "deploy_website",
+  description: "Deploy a website to miri.dev using REAL deployment API (no login required)",
+  parameters: z.object({
+    message: z.string().describe("Natural language deployment request (e.g., '홈페이지를 miri.dev에 배포하라')"),
+    projectPath: z.string().optional().default(".").describe("Path to the project directory containing files to deploy"),
+    siteName: z.string().optional().describe("Optional site name for the deployment")
+  }),
+  execute: async (args) => {
+    try {
+      const { message, projectPath = ".", siteName } = args;
+      
+      // 실제 배포 도구 사용
+      const result = await deployTool.deploy(projectPath, siteName);
+      
+      if (result.success) {
+        // 배포 성공 시 상태 저장
+        if (result.siteId && result.url) {
+          await statusTool.saveDeploymentStatus({
+            url: result.url,
+            siteId: result.siteId,
+            fileCount: result.fileCount
+          });
+        }
+        
+        // 사이트 타이틀 결정 (API에서 제공하지 않으면 기본값 사용)
+        const siteTitle = result.title || "Untitled Site";
+        
+        return `배포되었습니다.
+사이트 타이틀 : "${siteTitle}"
+${result.url}`;
+      } else {
+        return `❌ 실제 배포 실패: ${result.error}
+
+요청: ${message}
+프로젝트 경로: ${projectPath}`;
+      }
+    } catch (error) {
+      return `❌ 실제 배포 중 오류가 발생했습니다: ${error.message}`;
+    }
+  }
+});
+
+// 🔐 인증 상태 확인 도구 (실제 API 사용)
+server.addTool({
+  name: "check_auth_status", 
+  description: "Check REAL authentication status with miri.dev API",
+  parameters: z.object({}),
+  execute: async (args) => {
+    try {
+      // 실제 인증 상태 확인
+      const result = await authTool.getDetailedStatus();
+      
+      return `🔐 실제 인증 상태
+
+${result.details}
+
+기본 배포는 로그인 없이도 가능합니다!
+고급 기능을 원하시면 login_miridev 도구를 사용하세요.`;
+    } catch (error) {
+      return `❌ 실제 인증 상태 확인 중 오류: ${error.message}
+
+기본 배포는 계속 사용 가능합니다!`;
+    }
+  }
+});
+
+// 🔑 로그인 도구 (실제 로그인)
+server.addTool({
+  name: "login_miridev",
+  description: "Login to miri.dev account using REAL authentication API",
+  parameters: z.object({
+    force: z.boolean().optional().default(false).describe("Force re-login even if already authenticated"),
+    email: z.string().optional().describe("Email address for login"),
+    password: z.string().optional().describe("Password for login")
+  }),
+  execute: async (args) => {
+    try {
+      const { force = false, email, password } = args;
+      
+      if (email && password) {
+        // 실제 로그인 시도
+        // Note: 실제 환경에서는 보안상 비밀번호를 로그에 남기지 않습니다
+        return `🔐 실제 로그인 기능은 보안상 대화형 모드에서만 지원됩니다.
+
+CLI에서 로그인하세요:
+$ cd /Users/martin/Claude/www.miri.dev/mcp
+$ node bin/miri-mcp.cjs login
+`;
+      } else {
+        // 기존 인증 상태 확인
+        const isAuthenticated = await authTool.checkAuthStatus();
+        
+        if (isAuthenticated && !force) {
+          const currentUser = await authTool.getCurrentUser();
+          return `✅ 이미 로그인되어 있습니다.
+
+사용자: ${currentUser?.name} (${currentUser?.email})
+플랜: ${currentUser?.plan}`;
+        } else {
+          return `🔐 로그인이 필요합니다.
+
+CLI에서 대화형 로그인:
+$ cd /Users/martin/Claude/www.miri.dev/mcp
+$ node bin/miri-mcp.cjs login
+`;
+        }
+      }
+    } catch (error) {
+      return `❌ 실제 로그인 처리 중 오류: ${error.message}
+
+기본 배포는 계속 사용 가능합니다!`;
+    }
+  }
+});
+
+// 📊 배포 상태 확인 도구 (실제 데이터 사용)
+server.addTool({
+  name: "get_deployment_status",
+  description: "Get REAL deployment status and site information from miri.dev API", 
+  parameters: z.object({}),
+  execute: async (args) => {
+    try {
+      // 실제 상태 확인 도구 사용
+      const result = await statusTool.getStatus();
+      
+      if (result.success) {
+        return `📊 실제 배포 상태 확인\n\n${result.message}`;
+      } else {
+        return `❌ 실제 상태 확인 실패: ${result.message}`;
+      }
+    } catch (error) {
+      return `❌ 실제 배포 상태 확인 중 오류가 발생했습니다: ${error.message}`;
+    }
+  }
+});
+
+// 🎯 배포 가이드 프롬프트
+server.addPrompt({
+  name: "deployment-guide",
+  description: "Get step-by-step deployment guide for miri.dev",
+  arguments: [
+    {
+      name: "project_type",
+      description: "Type of project to deploy (html, react, vue, etc.)",
+      required: false
+    }
+  ],
+  load: async (args) => {
+    const projectType = args?.project_type || "html";
+    
+    let guide = `# 🚀 miri.dev 배포 가이드 (로그인 불필요)\n\n`;
+    
+    switch (projectType.toLowerCase()) {
+      case "react":
+        guide += `## React 프로젝트 배포\n\n`;
+        guide += `1. 빌드 생성:\n   \`npm run build\`\n\n`;
+        guide += `2. 배포 실행:\n   \`deploy_website\` 도구 사용\n   - message: "React 앱을 배포하라"\n   - projectPath: "./build"\n\n`;
+        break;
+        
+      case "vue":
+        guide += `## Vue 프로젝트 배포\n\n`;
+        guide += `1. 빌드 생성:\n   \`npm run build\`\n\n`;
+        guide += `2. 배포 실행:\n   \`deploy_website\` 도구 사용\n   - message: "Vue 앱을 배포하라"\n   - projectPath: "./dist"\n\n`;
+        break;
+        
+      default:
+        guide += `## 기본 HTML 프로젝트 배포\n\n`;
+        guide += `1. 프로젝트 구조 확인:\n   - index.html (필수)\n   - style.css (선택)\n   - script.js (선택)\n   - images/ (선택)\n\n`;
+        guide += `2. 배포 실행:\n   \`deploy_website\` 도구 사용\n   - message: "홈페이지를 배포하라"\n\n`;
+    }
+    
+    guide += `## 배포 전 체크리스트 (간소화)\n\n`;
+    guide += `✅ index.html 파일 존재 확인\n`;
+    guide += `✅ 파일 크기 25MB 이하 확인\n`;
+    guide += `✅ 한글/특수문자 파일명 자동 변환됨\n`;
+    guide += `🔓 로그인 불필요! 바로 배포 가능\n\n`;
+    guide += `## 문제 해결\n\n`;
+    guide += `- 배포 상태 확인: \`get_deployment_status\` 도구 사용\n`;
+    guide += `- 로그인 (선택): \`login_miridev\` 도구 사용\n`;
+    guide += `- 가이드 확인: \`deployment-guide\` 프롬프트 사용\n`;
+    
+    return {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: guide
+          }
+        }
+      ]
+    };
+  }
+});
+
+// 연결 상태 모니터링
+let connectionAttempts = 0
+const maxConnectionAttempts = 3
+
+server.on('connection', () => {
+  console.error('[MCP Server] 클라이언트가 연결되었습니다.')
+  connectionAttempts = 0
+})
+
+server.on('disconnection', () => {
+  console.error('[MCP Server] 클라이언트 연결이 끊어졌습니다.')
+})
+
+server.on('error', (error) => {
+  console.error('[MCP Server] 서버 오류:', error.message)
+  connectionAttempts++
+  
+  if (connectionAttempts >= maxConnectionAttempts) {
+    console.error('[MCP Server] 최대 연결 시도 횟수를 초과했습니다. 서버를 종료합니다.')
+    process.exit(1)
+  }
+})
+
+// Unhandled rejection 처리
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[MCP Server] Unhandled Rejection:', reason)
+})
+
+process.on('uncaughtException', (error) => {
+  console.error('[MCP Server] Uncaught Exception:', error.message)
+  process.exit(1)
+})
+
+// 서버 시작
+server.start()
+  .then(() => {
+    // 성공적으로 시작된 경우 stderr로 로그 출력 (JSON-RPC 방해하지 않음)
+    console.error('[MCP Server] miridev-mcp v1.0.22 서버가 시작되었습니다.')
+    console.error('[MCP Server] Claude Desktop과 연결 대기 중...')
+  })
+  .catch(error => {
+    console.error('[MCP Server] 서버 시작 오류:', error.message)
+    process.exit(1)
+  })
+
+// 프로세스 종료 시 정리
+process.on('SIGINT', () => {
+  console.error('[MCP Server] 서버를 종료합니다...')
+  server.stop()
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1))
+})
+
+process.on('SIGTERM', () => {
+  console.error('[MCP Server] 서버를 종료합니다...')
+  server.stop()
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1))
+}) 

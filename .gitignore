@@ -1,0 +1,13 @@
+node_modules
+.next
+.vercel
+
+admin-dashboard-react
+.env.prod
+.env.dev
+.env copy.prod
+admin.miri.dev
+.DS_Store
+
+.wrangler/
+cli_backup

@@ -1,0 +1,106 @@
+{
+  "name": "miridev-mcp",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server and CLI for deploying websites to miri.dev using natural language",
+  "main": "src/index.js",
+  "bin": {
+    "miri-mcp": "./bin/miri-mcp.js"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.js bin/**/*.js",
+    "lint:fix": "eslint src/**/*.js bin/**/*.js --fix",
+    "dev": "node src/index.js",
+    "cli": "node bin/miri-mcp.js",
+    "interactive": "node interactive_test.cjs",
+    "install:claude": "node scripts/install-claude-config.js",
+    "prepublishOnly": "npm test && npm run lint && chmod +x bin/miri-mcp.js",
+    "pretest": "npm run check",
+    "check": "npm run test && npm run lint && echo '✅ 모든 체크 통과!'",
+    "verify": "npm pack --dry-run",
+    "release": "npm run check && npm version patch && npm publish && npm run postrelease",
+    "release:minor": "npm run check && npm version minor && npm publish && npm run postrelease",
+    "release:major": "npm run check && npm version major && npm publish && npm run postrelease", 
+    "postrelease": "echo '🎉 miridev-mcp 배포 완료! npm install -g miridev-mcp 로 설치할 수 있습니다.'"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "miri.dev",
+    "deployment",
+    "website",
+    "static-hosting",
+    "cli",
+    "natural-language",
+    "ai",
+    "claude",
+    "llm",
+    "automation"
+  ],
+  "author": {
+    "name": "Miri.dev Team",
+    "email": "support@miri.dev", 
+    "url": "https://www.miri.dev"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^9.4.1",
+    "dotenv": "^16.0.3",
+    "form-data": "^4.0.0",
+    "fs-extra": "^11.1.0",
+    "glob": "^8.0.3",
+    "inquirer": "^8.2.5",
+    "mime-types": "^2.1.35",
+    "node-fetch": "^2.6.7",
+    "ora": "^5.4.1"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "eslint-config-standard": "^17.1.0",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^6.6.0",
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hongsw/www.miri.dev.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://www.miri.dev/docs/mcp",
+  "bugs": {
+    "url": "https://github.com/hongsw/www.miri.dev/issues",
+    "email": "support@miri.dev"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "USAGE.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "mcp": {
+    "name": "miridev",
+    "description": "Deploy websites to miri.dev using natural language commands",
+    "tools": [
+      "deploy_website",
+      "check_auth_status", 
+      "login_miridev",
+      "get_deployment_status"
+    ],
+    "server": {
+      "command": "node",
+      "args": ["src/index.js"]
+    }
+  }
+} 

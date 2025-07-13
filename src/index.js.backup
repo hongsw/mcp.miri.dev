@@ -1,0 +1,862 @@
+#!/usr/bin/env node
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js';
+import { MiriDevAuthTool } from './tools/auth.js';
+import zlib from 'zlib';
+
+class MiriDevMCPServer {
+  constructor() {
+    this.server = new Server(
+      {
+        name: 'miridev-mcp-server',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+          resources: {},
+        },
+      }
+    );
+
+    this.authTool = new MiriDevAuthTool();
+    
+    // Artifact 리소스 저장소
+    this.artifactStorage = new Map();
+    
+    // 현재 세션의 Artifact 레지스트리 (ID → Resource 매핑)
+    this.currentArtifacts = new Map();
+
+    this.setupToolHandlers();
+    this.setupResourceHandlers();
+  }
+
+  setupToolHandlers() {
+    // 도구 목록 반환
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: [
+          {
+            name: 'check_auth_status',
+            description: 'miri.dev 인증 상태를 확인합니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+          {
+            name: 'get_deployment_status',
+            description: 'miri.dev 서비스 상태와 최근 배포 현황을 확인합니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+          {
+            name: 'deploy_from_current_artifact',
+            description: 'Artifact ID와 HTML 내용으로 자동 등록 후 즉시 배포합니다. 원클릭 배포 도구입니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                artifactId: {
+                  type: 'string',
+                  description: 'Claude Desktop의 현재 artifact ID (예: artifact_1234567890)',
+                },
+                htmlContent: {
+                  type: 'string',
+                  description: '현재 artifact의 완전한 HTML 내용 (<!DOCTYPE html>부터 </html>까지)',
+                },
+                projectName: {
+                  type: 'string',
+                  description: '프로젝트 이름 (선택사항, 기본값: "Claude Artifact")',
+                },
+                description: {
+                  type: 'string',
+                  description: '프로젝트 설명 (선택사항)',
+                },
+              },
+              required: ['artifactId', 'htmlContent'],
+            },
+          },
+          {
+            name: 'deploy_single_file',
+            description: '단일 HTML 파일을 miri.dev에 즉시 배포합니다. 간편한 원파일 배포 도구입니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                filePath: {
+                  type: 'string',
+                  description: '배포할 HTML 파일의 절대 경로 또는 상대 경로 (예: ./index.html, /Users/user/page.html)',
+                },
+                projectName: {
+                  type: 'string',
+                  description: '프로젝트 이름 (선택사항, 파일명으로 자동 설정)',
+                },
+                description: {
+                  type: 'string',
+                  description: '프로젝트 설명 (선택사항)',
+                },
+              },
+              required: ['filePath'],
+            },
+          },
+          {
+            name: 'deploy_folder',
+            description: '로컬 폴더의 모든 파일을 miri.dev에 배포합니다. CLI와 동일한 기능입니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                folderPath: {
+                  type: 'string',
+                  description: '배포할 폴더의 절대 경로 또는 상대 경로 (예: /Users/user/my-project, ./my-site)',
+                },
+                projectName: {
+                  type: 'string',
+                  description: '프로젝트 이름 (선택사항, 폴더명으로 자동 설정)',
+                },
+                description: {
+                  type: 'string',
+                  description: '프로젝트 설명 (선택사항)',
+                },
+              },
+              required: ['folderPath'],
+            },
+          },
+        ],
+      };
+    });
+
+    // 도구 실행 처리
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+
+      try {
+        switch (name) {
+          case 'check_auth_status':
+            return await this.handleAuthStatus();
+
+          case 'get_deployment_status':
+            return await this.handleDeploymentStatus();
+
+          case 'deploy_from_current_artifact':
+            return await this.handleDeployFromCurrentArtifact(args);
+
+          case 'deploy_folder':
+            return await this.handleDeployFolder(args);
+
+          default:
+            throw new McpError(
+              ErrorCode.MethodNotFound,
+              `Unknown tool: ${name}`
+            );
+        }
+      } catch (error) {
+        console.error(`Tool execution error:`, error);
+        throw new McpError(
+          ErrorCode.InternalError,
+          `Tool execution failed: ${error.message}`
+        );
+      }
+    });
+  }
+
+  setupResourceHandlers() {
+    // 리소스 목록 반환
+    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      const resources = [];
+      
+      // 배포 가이드 리소스 추가
+      resources.push({
+        uri: 'guide://deployment-guide',
+        name: '🚀 miri.dev Artifact 배포 가이드',
+        description: 'Claude Artifact를 miri.dev에 배포하는 단계별 가이드',
+        mimeType: 'text/markdown',
+      });
+      
+      // 현재 세션의 직접 연결된 artifacts
+      for (const [artifactId, artifactInfo] of this.currentArtifacts.entries()) {
+        resources.push({
+          uri: `artifact://${artifactId}`,
+          name: `${artifactInfo.projectName} - Live Artifact`,
+          description: artifactInfo.description || 'Current Session Artifact (토큰 소비 없음)',
+          mimeType: 'text/html',
+        });
+      }
+
+      return { resources };
+    });
+
+    // 리소스 내용 읽기
+    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const { uri } = request.params;
+      
+      if (uri === 'guide://deployment-guide') {
+        // 배포 가이드 내용 반환
+        return {
+          contents: [
+            {
+              uri,
+              mimeType: 'text/markdown',
+              text: this.getDeploymentGuide(),
+            },
+          ],
+        };
+      } else if (uri.startsWith('artifact://')) {
+        // 현재 세션의 artifact (토큰 소비 없이 직접 접근)
+        const artifactId = uri.replace('artifact://', '');
+        const artifactInfo = this.currentArtifacts.get(artifactId);
+        
+        if (!artifactInfo) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Current artifact not found: ${artifactId}`
+          );
+        }
+
+        // 실제 HTML 내용 반환 (Claude Desktop에서 제공되어야 함)
+        // 현재는 메타데이터와 함께 안내 메시지 반환
+        return {
+          contents: [
+            {
+              uri,
+              mimeType: 'text/html',
+              text: `<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${artifactInfo.projectName}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            background: #f9f9f9;
+        }
+        .info-box {
+            background: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .artifact-id {
+            color: #666;
+            font-family: monospace;
+            background: #f5f5f5;
+            padding: 5px 10px;
+            border-radius: 5px;
+            display: inline-block;
+            margin: 10px 0;
+        }
+        .status {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+        .solution {
+            background: #e8f5e8;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+    <div class="info-box">
+        <h1>🔗 MCP Resource 연결됨</h1>
+        <p><strong>프로젝트:</strong> ${artifactInfo.projectName}</p>
+        <div class="artifact-id">${artifactId}</div>
+        <p class="status">⚠️ 실제 Artifact HTML 내용이 필요합니다</p>
+        
+        <div class="solution">
+            <h3>💡 해결 방법:</h3>
+            <p>Claude Desktop에서 현재 artifact의 실제 HTML 내용을 이 Resource로 제공해야 합니다.</p>
+            <p><strong>현재 상태:</strong> 메타데이터만 사용 가능</p>
+            <p><strong>필요:</strong> 실제 artifact HTML → Resource 연동</p>
+        </div>
+        
+        <p><small>등록 시간: ${new Date(artifactInfo.registeredAt).toLocaleString()}</small></p>
+    </div>
+</body>
+</html>`,
+            },
+          ],
+        };
+      } else {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Unsupported resource URI: ${uri}`
+        );
+      }
+    });
+  }
+
+  async handleDeployFromCurrentArtifact(args) {
+    const { artifactId, htmlContent, projectName, description } = args;
+
+    try {
+      process.stderr.write(`🚀 [DEPLOY] 통합 배포 시작: ${artifactId}\n`);
+      process.stderr.write(`🔍 [DEBUG] 프로젝트명: ${projectName || 'Claude Artifact'}\n`);
+      process.stderr.write(`🔍 [DEBUG] 설명: ${description || '없음'}\n`);
+      
+      // 1단계: Artifact 자동 등록
+      const finalProjectName = projectName || 'Claude Artifact';
+      this.currentArtifacts.set(artifactId, {
+        projectName: finalProjectName,
+        description,
+        registeredAt: new Date().toISOString(),
+      });
+      
+      // 2단계: HTML 내용 검증
+      process.stderr.write(`🔍 [DEBUG] HTML 내용 검증 중...\n`);
+      
+      if (!htmlContent || htmlContent.trim().length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ HTML 내용이 제공되지 않았습니다.\n\n🆔 Artifact ID: ${artifactId}\n📁 프로젝트명: ${finalProjectName}\n\n**사용법:**\n현재 ${artifactId} artifact의 HTML 코드를 복사해서 다음과 같이 호출해주세요:\n\n\`\`\`\ndeploy_from_current_artifact({\n  artifactId: "${artifactId}",\n  htmlContent: "<!DOCTYPE html>..." // 여기에 복사한 HTML 붙여넣기\n  projectName: "${finalProjectName}"\n})\n\`\`\`\n\n💡 **팁:** artifact 화면에서 전체 HTML 코드를 복사할 수 있습니다.`,
+            },
+          ],
+        };
+      }
+      
+      process.stderr.write(`📄 [DEBUG] HTML 크기: ${htmlContent.length} bytes\n`);
+      const finalHtmlContent = htmlContent;
+      
+      // 3단계: HTML 내용으로 배포
+      const deployResult = await this.deployToMiriDev({
+        htmlContent: finalHtmlContent,
+        projectName: finalProjectName,
+        description,
+      });
+
+      // deployResult 로그
+      process.stderr.write(`🔍 [DEBUG] 배포 결과: ${JSON.stringify(deployResult)}\n`);
+
+      // 배포 결과 반환
+      if (deployResult.success) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `🎉 Artifact 통합 배포 성공!\n\n🆔 Artifact ID: ${artifactId}\n📁 프로젝트명: ${finalProjectName}\n📍 사이트 URL: ${deployResult.site.url}\n🆔 사이트 ID: ${deployResult.site.shortId}\n⏰ 배포 시간: ${new Date(deployResult.site.created_at).toLocaleString()}\n📊 파일 수: ${deployResult.site.fileCount}개\n⏳ 만료일: ${new Date(deployResult.site.expires_at).toLocaleString()}\n\n${description ? `📝 설명: ${description}\n\n` : ''}✅ **전체 과정 완료:** 등록 → 배포 → 완료!\n\n🎯 **바로 접속해서 확인해보세요:** ${deployResult.site.url}\n\n💡 **회원가입 혜택:**\n• 현재: 1시간 무료 호스팅\n• 회원가입 시: 3일 무료 호스팅 (72시간)\n• 추가 혜택: 배포 히스토리, 커스텀 도메인\n\n👉 **회원가입:** https://www.miri.dev/dashboard`,
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ Artifact 통합 배포 실패\n\n🆔 Artifact ID: ${artifactId}\n📁 프로젝트명: ${finalProjectName}\n\n오류 내용: ${deployResult.error}\n\n✅ **등록 완료:** Artifact는 Resource로 등록되었습니다\n❌ **배포 실패:** 네트워크 또는 서버 오류\n\n🔄 **재시도:** 동일한 도구로 다시 시도해보세요`,
+            },
+          ],
+        };
+      }
+
+    } catch (error) {
+      process.stderr.write(`❌ [ERROR] 통합 배포 실패: ${error.message}\n`);
+      process.stderr.write(`❌ [ERROR] 스택 트레이스: ${error.stack}\n`);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `❌ Artifact 통합 배포 중 오류가 발생했습니다\n\n${error.message}\n\n🔍 **디버그:** 자세한 오류 로그는 stderr에서 확인하세요.\n\n💡 **도움말:**\n- HTML 내용이 올바른지 확인해주세요\n- 네트워크 연결 상태를 확인해주세요\n- 다시 시도해보세요`,
+          },
+        ],
+      };
+    }
+  }
+
+
+
+  async handleDeployFolder(args) {
+    const { folderPath, projectName, description } = args;
+
+    try {
+      process.stderr.write(`📁 [DEPLOY] 폴더 배포 시작: ${folderPath}\n`);
+      
+      // 1단계: 폴더 경로 검증
+      const fs = await import('fs');
+      const path = await import('path');
+      
+      let resolvedPath;
+      if (path.isAbsolute(folderPath)) {
+        resolvedPath = folderPath;
+      } else {
+        resolvedPath = path.resolve(process.cwd(), folderPath);
+      }
+      
+      process.stderr.write(`🔍 [DEBUG] 해결된 경로: ${resolvedPath}\n`);
+      
+      if (!fs.existsSync(resolvedPath)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ 폴더를 찾을 수 없습니다: ${folderPath}\n\n해결된 경로: ${resolvedPath}\n\n**확인사항:**\n- 경로가 올바른지 확인하세요\n- 절대 경로 또는 상대 경로 모두 가능합니다\n- 예시: ./my-site, /Users/user/project`,
+            },
+          ],
+        };
+      }
+      
+      if (!fs.statSync(resolvedPath).isDirectory()) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ 지정된 경로가 폴더가 아닙니다: ${folderPath}\n\n해결된 경로: ${resolvedPath}\n\n폴더 경로를 지정해주세요.`,
+            },
+          ],
+        };
+      }
+      
+      // 2단계: 프로젝트명 설정
+      const finalProjectName = projectName || path.basename(resolvedPath);
+      process.stderr.write(`📁 [DEBUG] 프로젝트명: ${finalProjectName}\n`);
+      
+      // 3단계: 파일 수집 (CLI와 동일한 로직)
+      process.stderr.write(`🔍 [DEBUG] 파일 스캔 시작...\n`);
+      const files = await this.collectFiles(resolvedPath);
+      
+      if (files.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ 배포할 파일이 없습니다: ${folderPath}\n\n해결된 경로: ${resolvedPath}\n\n**확인사항:**\n- 폴더에 HTML, CSS, JS 등의 파일이 있는지 확인하세요\n- 숨김 파일은 제외됩니다`,
+            },
+          ],
+        };
+      }
+      
+      process.stderr.write(`📊 [DEBUG] 수집된 파일: ${files.length}개\n`);
+      files.forEach(file => {
+        process.stderr.write(`  - ${file.relativePath} (${file.size} bytes)\n`);
+      });
+      
+      // 4단계: CLI API로 배포
+      const deployResult = await this.deployFolderToMiriDev({
+        files,
+        projectName: finalProjectName,
+        description,
+        folderPath: resolvedPath,
+      });
+      
+      if (deployResult.success) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `🎉 폴더 배포 성공!\n\n📁 폴더: ${folderPath}\n📁 프로젝트명: ${finalProjectName}\n📍 사이트 URL: ${deployResult.site.url}\n🆔 사이트 ID: ${deployResult.site.shortId}\n⏰ 배포 시간: ${new Date(deployResult.site.created_at).toLocaleString()}\n📊 파일 수: ${deployResult.site.fileCount}개\n⏳ 만료일: ${new Date(deployResult.site.expires_at).toLocaleString()}\n\n${description ? `📝 설명: ${description}\n\n` : ''}🎯 **바로 접속해서 확인해보세요:** ${deployResult.site.url}\n\n💡 **회원가입 혜택:**\n• 현재: 1시간 무료 호스팅\n• 회원가입 시: 3일 무료 호스팅 (72시간)\n• 추가 혜택: 배포 히스토리, 커스텀 도메인\n\n👉 **회원가입:** https://www.miri.dev/dashboard`,
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ 폴더 배포 실패\n\n📁 폴더: ${folderPath}\n📁 프로젝트명: ${finalProjectName}\n\n오류 내용: ${deployResult.error}\n\n🔄 **재시도:** 같은 명령으로 다시 시도해보세요`,
+            },
+          ],
+        };
+      }
+      
+    } catch (error) {
+      process.stderr.write(`❌ [ERROR] 폴더 배포 실패: ${error.message}\n`);
+      process.stderr.write(`❌ [ERROR] 스택 트레이스: ${error.stack}\n`);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `❌ 폴더 배포 중 오류가 발생했습니다\n\n${error.message}\n\n🔍 **디버그:** 자세한 오류 로그는 stderr에서 확인하세요.\n\n💡 **도움말:**\n- 폴더 경로가 올바른지 확인해주세요\n- 읽기 권한이 있는지 확인해주세요\n- 네트워크 연결 상태를 확인해주세요`,
+          },
+        ],
+      };
+    }
+  }
+
+  async collectFiles(folderPath) {
+    const fs = await import('fs');
+    const path = await import('path');
+    const files = [];
+    
+    function scanDirectory(dir, baseDir = dir) {
+      const items = fs.readdirSync(dir);
+      
+      for (const item of items) {
+        const fullPath = path.join(dir, item);
+        const stat = fs.statSync(fullPath);
+        
+        if (stat.isDirectory()) {
+          // 숨김 폴더와 node_modules 제외
+          if (!item.startsWith('.') && item !== 'node_modules') {
+            scanDirectory(fullPath, baseDir);
+          }
+        } else if (stat.isFile()) {
+          // 숨김 파일 제외
+          if (!item.startsWith('.')) {
+            const relativePath = path.relative(baseDir, fullPath);
+            const content = fs.readFileSync(fullPath);
+            
+            files.push({
+              relativePath: relativePath.replace(/\\/g, '/'), // Windows 경로 정규화
+              content,
+              size: stat.size,
+              fullPath,
+            });
+          }
+        }
+      }
+    }
+    
+    scanDirectory(folderPath);
+    return files;
+  }
+
+  async deployFolderToMiriDev(args) {
+    const { files, projectName, description, folderPath } = args;
+
+    try {
+      process.stderr.write(`🚀 [DEPLOY] "${projectName}" 폴더 배포 시작...\n`);
+      process.stderr.write(`📁 [DEBUG] 폴더: ${folderPath}\n`);
+      process.stderr.write(`📊 [DEBUG] 파일 수: ${files.length}개\n`);
+      
+      // FormData 생성 (CLI와 동일한 방식)
+      const FormData = (await import('form-data')).default;
+      const form = new FormData();
+      
+      // 메타데이터 추가
+      form.append('projectName', projectName || 'folder-site');
+      form.append('title', projectName || 'Folder Site');
+      form.append('description', description || `${projectName} 폴더에서 배포된 사이트`);
+      form.append('userEmail', 'mcp-user@miri.dev');
+      form.append('userId', 'mcp-folder-user');
+      
+      // 파일들 추가
+      files.forEach((file, index) => {
+        form.append(`file_${index}`, file.content, {
+          filename: file.relativePath.split('/').pop(), // 파일명만
+          contentType: this.getContentType(file.relativePath),
+        });
+        form.append(`filePath_${index}`, file.relativePath); // 전체 경로
+      });
+      
+      process.stderr.write(`🌐 [DEBUG] API 호출 시작: https://www.miri.dev/api/deploy\n`);
+
+      const response = await fetch('https://www.miri.dev/api/deploy', {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'miri-dev-mcp-client/1.0.0',
+          ...form.getHeaders(),
+        },
+        body: form,
+        timeout: 60000, // 60초 타임아웃 (파일이 많을 수 있음)
+      });
+
+      process.stderr.write(`📡 [DEBUG] API 응답: ${response.status} ${response.statusText}\n`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        process.stderr.write(`❌ [ERROR] 응답 내용: ${errorText}\n`);
+        
+        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        
+        try {
+          const errorData = JSON.parse(errorText);
+          errorMessage = errorData.error || errorMessage;
+          process.stderr.write(`❌ [ERROR] 파싱된 오류: ${errorMessage}\n`);
+        } catch (e) {
+          errorMessage += `\nResponse: ${errorText}`;
+        }
+        
+        return { success: false, error: errorMessage };
+      }
+
+      const result = await response.json();
+      process.stderr.write(`✅ [SUCCESS] 폴더 배포 완료! 사이트 ID: ${result.site?.shortId || 'N/A'}\n`);
+      return result;
+
+    } catch (error) {
+      process.stderr.write(`❌ [ERROR] 폴더 배포 중 예외 발생: ${error.message}\n`);
+      process.stderr.write(`❌ [ERROR] 스택 트레이스: ${error.stack}\n`);
+      
+      return { success: false, error: error.message };
+    }
+  }
+
+  getContentType(filePath) {
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    const contentTypes = {
+      'html': 'text/html',
+      'css': 'text/css',
+      'js': 'application/javascript',
+      'json': 'application/json',
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'gif': 'image/gif',
+      'svg': 'image/svg+xml',
+      'ico': 'image/x-icon',
+      'txt': 'text/plain',
+      'md': 'text/markdown',
+    };
+    return contentTypes[ext] || 'application/octet-stream';
+  }
+
+  async deployToMiriDev(args) {
+    const { htmlContent, projectName, description } = args;
+
+    try {
+      process.stderr.write(`🚀 [DEPLOY] "${projectName}" 배포 시작...\n`);
+      process.stderr.write(`🔍 [DEBUG] HTML 크기: ${htmlContent.length} bytes\n`);
+      
+      // gzip 압축 적용
+      process.stderr.write(`🔍 [DEBUG] gzip 압축 시작...\n`);
+      const compressedHtml = zlib.gzipSync(Buffer.from(htmlContent, 'utf8'));
+      
+      const deployData = {
+        htmlContent: compressedHtml.toString('base64'),
+        projectName: projectName || 'artifact-site',
+        title: projectName || 'Artifact Site',
+        description: description || 'Claude Artifact에서 생성된 사이트',
+        userEmail: 'mcp-user@miri.dev',
+        userId: 'mcp-artifact-user',
+        compressed: true
+      };
+
+      process.stderr.write(`📦 [DEBUG] 압축 완료: 원본 ${htmlContent.length}B -> 압축 ${compressedHtml.length}B (${((1 - compressedHtml.length / htmlContent.length) * 100).toFixed(1)}% 절약)\n`);
+      process.stderr.write(`🌐 [DEBUG] API 호출 시작: https://www.miri.dev/api/deploy-html\n`);
+
+      const response = await fetch('https://www.miri.dev/api/deploy-html', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'miri-dev-mcp-client/1.0.0',
+        },
+        body: JSON.stringify(deployData),
+        timeout: 30000, // 30초 타임아웃
+      });
+
+      process.stderr.write(`📡 [DEBUG] API 응답: ${response.status} ${response.statusText}\n`);
+
+
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        process.stderr.write(`❌ [ERROR] 응답 내용: ${errorText}\n`);
+        
+        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        
+        try {
+          const errorData = JSON.parse(errorText);
+          errorMessage = errorData.error || errorMessage;
+          process.stderr.write(`❌ [ERROR] 파싱된 오류: ${errorMessage}\n`);
+        } catch (e) {
+          errorMessage += `\nResponse: ${errorText}`;
+          process.stderr.write(`❌ [ERROR] JSON 파싱 실패: ${e.message}\n`);
+        }
+        
+        return { success: false, error: errorMessage };
+      }
+
+      const result = await response.json();
+      process.stderr.write(`✅ [SUCCESS] 배포 완료! 사이트 ID: ${result.site?.shortId || 'N/A'}\n`);
+      return result;
+
+    } catch (error) {
+      process.stderr.write(`❌ [ERROR] 배포 중 예외 발생: ${error.message}\n`);
+      process.stderr.write(`❌ [ERROR] 오류 타입: ${error.name}\n`);
+      process.stderr.write(`❌ [ERROR] 오류 코드: ${error.code || 'N/A'}\n`);
+      
+      // 네트워크 관련 오류 상세 정보
+      if (error.cause) {
+        process.stderr.write(`❌ [ERROR] 원인: ${error.cause.message}\n`);
+        process.stderr.write(`❌ [ERROR] 원인 코드: ${error.cause.code || 'N/A'}\n`);
+      }
+      
+      process.stderr.write(`❌ [ERROR] 스택 트레이스: ${error.stack}\n`);
+      
+      // 사용자 친화적 오류 메시지
+      let userMessage = error.message;
+      if (error.message === 'fetch failed') {
+        userMessage = '네트워크 연결 실패 - miri.dev 서버에 연결할 수 없습니다';
+        
+        // 연결 테스트 시도
+        process.stderr.write(`🔍 [DEBUG] 연결 테스트 시도...\n`);
+        try {
+          const testResponse = await fetch('https://www.miri.dev', { 
+            method: 'HEAD',
+            timeout: 5000
+          });
+          process.stderr.write(`🔍 [DEBUG] 기본 연결 테스트: ${testResponse.status}\n`);
+        } catch (testError) {
+          process.stderr.write(`❌ [ERROR] 기본 연결도 실패: ${testError.message}\n`);
+        }
+      }
+      
+      return { success: false, error: userMessage };
+    }
+  }
+
+  async handleAuthStatus() {
+    const status = await this.authTool.getDetailedStatus();
+    
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `🔐 miri.dev 인증 상태\n\n${status.isAuthenticated ? '✅ 로그인됨' : '❌ 로그인 필요'}\n\n${status.details}`,
+        },
+      ],
+    };
+  }
+
+  async handleDeploymentStatus() {
+    try {
+      process.stderr.write(`🔍 [DEBUG] miri.dev 서비스 상태 확인 시작...\n`);
+      
+      // miri.dev 서비스 상태 확인
+      const response = await fetch('https://www.miri.dev', {
+        method: 'HEAD',
+        headers: {
+          'User-Agent': 'miri-dev-mcp-client/1.0.0',
+        },
+        timeout: 10000
+      });
+
+      process.stderr.write(`🔍 [DEBUG] API 응답 상태: ${response.status} ${response.statusText}\n`);
+      
+      // 리다이렉트도 정상으로 간주
+      const serviceStatus = (response.ok || (response.status >= 300 && response.status < 400)) ? '🟢 정상' : '🔴 장애';
+      
+      // 인증 상태 확인
+      process.stderr.write(`🔍 [DEBUG] 인증 상태 확인 중...\n`);
+      const authStatus = await this.authTool.checkAuthStatus();
+      const authText = authStatus ? '🔐 로그인됨' : '🔓 로그인 필요';
+
+      // 최근 배포 정보 (로컬 상태)
+      const recentDeployments = this.getRecentDeployments();
+
+      process.stderr.write(`✅ [DEBUG] 상태 확인 완료 - 서비스: ${serviceStatus}, 인증: ${authText}\n`);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `📊 miri.dev 배포 상태\n\n🌐 서비스 상태: ${serviceStatus}\n${authText}\n\n📈 최근 배포 현황:\n${recentDeployments}\n\n💡 사용 가능한 기능:\n• deploy_from_current_artifact: Artifact HTML 배포 (원클릭)\n• deploy_folder: 로컬 폴더 배포 (CLI와 동일)\n• check_auth_status: 인증 상태 확인\n\n🎯 **두 가지 배포 방식:**\n1. **Artifact 배포**: Claude에서 생성한 HTML을 즉시 배포\n2. **폴더 배포**: 로컬 프로젝트 폴더를 통째로 배포\n\n📖 **배포 가이드:** Resource 패널에서 "🚀 miri.dev Artifact 배포 가이드"를 확인하세요!\n⏰ **배포 혜택:** 로그인 없이 1시간 무료 → 회원가입 시 3일 무료\n\n🚀 준비 완료! 원하는 방식으로 배포해보세요.\n\n🔍 **디버그 정보:** 자세한 로그는 stderr에서 확인하세요.`,
+          },
+        ],
+      };
+
+    } catch (error) {
+      process.stderr.write(`❌ [ERROR] 서비스 상태 확인 실패: ${error.message}\n`);
+      process.stderr.write(`❌ [ERROR] 스택 트레이스: ${error.stack}\n`);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `📊 miri.dev 배포 상태\n\n❌ 서비스 상태 확인 실패: ${error.message}\n\n🔍 **디버그 정보:**\n- 오류 타입: ${error.name}\n- 네트워크 연결 확인 필요\n- fetch timeout: 5초\n\n💡 그래도 등록/배포는 시도해볼 수 있습니다:\n• register_current_artifact로 artifact를 등록해보세요\n• deploy_with_html로 직접 배포해보세요\n• 자세한 오류 로그는 stderr에서 확인하세요`,
+          },
+        ],
+      };
+    }
+  }
+
+  getRecentDeployments() {
+    // 간단한 로컬 배포 기록 (실제로는 서버에서 가져와야 함)
+    return '• 최근 배포 기록이 없습니다\n• register_current_artifact를 사용해서 첫 등록을 시작해보세요!';
+  }
+
+  getDeploymentGuide() {
+    return `# 🚀 miri.dev Artifact 배포 가이드
+
+Claude Desktop에서 생성한 Artifact를 miri.dev에 배포하는 완전한 가이드입니다.
+
+## 📋 원클릭 배포 절차
+
+### 🎯 새로운 통합 배포 도구 (권장)
+\`\`\`
+deploy_from_current_artifact({
+  artifactId: "artifact_1234567890",
+  projectName: "내 프로젝트",  // 선택사항
+  description: "프로젝트 설명"  // 선택사항
+})
+\`\`\`
+
+**특징:**
+- ✅ **자동 등록**: Artifact를 자동으로 Resource에 등록
+- ✅ **즉시 배포**: HTML 내용만 제공하면 바로 배포
+- ✅ **토큰 절약**: Resource 기반으로 토큰 소비 최소화
+- ✅ **원클릭**: 하나의 도구로 전체 과정 완료
+
+**주의사항:**
+- artifactId는 Claude가 생성한 정확한 ID를 사용하세요
+- projectName은 배포될 사이트의 이름이 됩니다 (기본값: "Claude Artifact")
+
+## ⏰ 배포 시간 제한
+
+### 🆓 무료 사용자 (로그인 없음)
+- **1시간 무료** 호스팅
+- 배포 즉시 사용 가능
+- 1시간 후 자동 삭제
+
+### 🎯 회원 가입 혜택
+- **3일 무료** 호스팅 (72시간)
+- 더 안정적인 서비스
+- 배포 히스토리 관리
+
+## 🔐 회원가입 안내
+
+배포 완료 후 다음 링크에서 회원가입하시면:
+- **무료 3일 연장** (총 72시간)
+- **배포 히스토리** 관리
+- **커스텀 도메인** 연결 가능
+- **더 많은 스토리지** 제공
+
+👉 **회원가입 링크:** https://www.miri.dev/dashboard
+
+## 🛠️ 사용 가능한 도구들
+
+1. **check_auth_status** - 로그인 상태 확인
+2. **get_deployment_status** - 서비스 상태 확인  
+3. **deploy_from_current_artifact** - 원클릭 통합 배포 (권장)
+
+## 📞 지원
+
+문제가 있으시면:
+- 이슈: GitHub 리포지토리
+- 이메일: support@miri.dev
+- 문서: https://www.miri.dev/docs
+
+---
+
+💡 **팁:** 배포 전에 \`get_deployment_status\`로 서비스 상태를 확인해보세요!
+`;
+  }
+
+  async run() {
+    const transport = new StdioServerTransport();
+    await this.server.connect(transport);
+    console.error('🚀 miri.dev MCP Server가 시작되었습니다');
+  }
+}
+
+// 서버 시작
+const server = new MiriDevMCPServer();
+server.run().catch(console.error); 
