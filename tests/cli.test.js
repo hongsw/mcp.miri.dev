@@ -2,7 +2,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 describe('CLI Tests', () => {
-  const cliPath = path.join(__dirname, '../bin/miri-mcp.js');
+  const cliPath = path.join(__dirname, '../bin/miri-mcp.cjs');
 
   test('CLI 도움말 출력', (done) => {
     const child = spawn('node', [cliPath, '--help'], { 

@@ -113,27 +113,41 @@ class MiriDevAuthTool {
       console.error(chalk.gray('- admin@miri.dev / admin123'));
       console.error('');
 
-      const answers = await inquirer.prompt([
-        {
-          type: 'input',
-          name: 'email',
-          message: '이메일:',
-          validate: (input) => {
-            if (!input) return '이메일을 입력해주세요.';
-            if (!input.includes('@')) return '올바른 이메일 형식이 아닙니다.';
-            return true;
+      let answers;
+      try {
+        answers = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'email',
+            message: '이메일:',
+            validate: (input) => {
+              if (!input) return '이메일을 입력해주세요.';
+              if (!input.includes('@')) return '올바른 이메일 형식이 아닙니다.';
+              return true;
+            }
+          },
+          {
+            type: 'password',
+            name: 'password',
+            message: '비밀번호:',
+            validate: (input) => {
+              if (!input) return '비밀번호를 입력해주세요.';
+              return true;
+            }
           }
-        },
-        {
-          type: 'password',
-          name: 'password',
-          message: '비밀번호:',
-          validate: (input) => {
-            if (!input) return '비밀번호를 입력해주세요.';
-            return true;
-          }
+        ]);
+      } catch (promptError) {
+        // 프롬프트 중단이나 readline 에러 처리
+        if (promptError.message.includes('User force closed') || 
+            promptError.code === 'ERR_USE_AFTER_CLOSE' ||
+            promptError.name === 'ExitPromptError') {
+          return {
+            success: false,
+            error: '로그인이 취소되었습니다.'
+          };
         }
-      ]);
+        throw promptError;
+      }
 
       // 계정 검증
       const account = this.validAccounts[answers.email.toLowerCase()];
@@ -147,6 +161,55 @@ class MiriDevAuthTool {
       // 사용자 정보 생성
       const user = {
         email: answers.email.toLowerCase(),
+        id: account.id,
+        plan: account.plan,
+        name: account.name,
+        loginAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30일
+        token: this.generateToken()
+      };
+
+      // 인증 정보 저장
+      await this.saveAuth(user);
+
+      return {
+        success: true,
+        message: `${user.name}(${user.email})로 성공적으로 로그인되었습니다.\n플랜: ${user.plan}\n토큰 만료일: ${new Date(user.expiresAt).toLocaleDateString()}`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `로그인 중 오류가 발생했습니다: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * 명령줄 인수로 받은 이메일/비밀번호로 로그인
+   */
+  async loginWithCredentials(email, password, force = false) {
+    try {
+      // 이미 로그인된 상태인지 확인
+      if (!force && await this.checkAuthStatus()) {
+        const currentUser = await this.loadAuth();
+        return {
+          success: true,
+          message: `이미 ${currentUser.name}(${currentUser.email})로 로그인되어 있습니다.`
+        };
+      }
+
+      // 계정 검증
+      const account = this.validAccounts[email.toLowerCase()];
+      if (!account || account.password !== password) {
+        return {
+          success: false,
+          error: '이메일 또는 비밀번호가 올바르지 않습니다.'
+        };
+      }
+
+      // 사용자 정보 생성
+      const user = {
+        email: email.toLowerCase(),
         id: account.id,
         plan: account.plan,
         name: account.name,

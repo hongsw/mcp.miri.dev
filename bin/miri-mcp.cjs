@@ -86,6 +86,8 @@ program
   .alias('l')
   .description('Login to miri.dev')
   .option('-f, --force', 'Force re-login')
+  .option('-e, --email <email>', 'Email address for login')
+  .option('-p, --password <password>', 'Password for login')
   .action(async (options) => {
     if (!program.opts().noHeader) showHeader();
 
@@ -93,14 +95,29 @@ program
       console.log(chalk.green('🔐 Starting login process...'));
 
       const { authTool } = await importTools();
-      const result = await authTool.login(options.force);
-
-      if (result.success) {
-        console.log(chalk.green('✅ Login successful!'));
-        console.log(chalk.blue(`👤 Logged in as: ${result.message}`));
+      
+      // 명령줄 옵션으로 받은 경우 직접 로그인
+      if (options.email && options.password) {
+        const result = await authTool.loginWithCredentials(options.email, options.password, options.force);
+        
+        if (result.success) {
+          console.log(chalk.green('✅ Login successful!'));
+          console.log(chalk.blue(`👤 ${result.message}`));
+        } else {
+          console.log(chalk.red('❌ Login failed:'), result.error || result.message);
+          process.exit(1);
+        }
       } else {
-        console.log(chalk.red('❌ Login failed:'), result.error || result.message);
-        process.exit(1);
+        // 인터랙티브 로그인
+        const result = await authTool.login(options.force);
+
+        if (result.success) {
+          console.log(chalk.green('✅ Login successful!'));
+          console.log(chalk.blue(`👤 ${result.message}`));
+        } else {
+          console.log(chalk.red('❌ Login failed:'), result.error || result.message);
+          process.exit(1);
+        }
       }
     } catch (error) {
       console.error(chalk.red('❌ Login error:'), error.message);
