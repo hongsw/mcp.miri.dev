@@ -1,6 +1,6 @@
 {
   "name": "miridev-mcp",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "type": "module",
   "description": "Model Context Protocol server and CLI for deploying websites to miri.dev using natural language",
   "main": "src/index.js",
