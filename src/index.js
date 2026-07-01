@@ -60,6 +60,10 @@ class MiriDevMCPServer {
                   type: 'string',
                   description: '사이트 이름 (선택사항)',
                 },
+                projectName: {
+                  type: 'string',
+                  description: '프로젝트 이름 (선택사항). 지정 시 고정 URL(name-shortid.miri.dev)을 확보하고, 이후 같은 폴더 재배포는 같은 URL로 업데이트됩니다. 로그인 필요.',
+                },
               },
               required: ['message'],
             },
@@ -107,7 +111,8 @@ class MiriDevMCPServer {
           case 'deploy_website': {
             const result = await this.deployTool.deploy(
               args.projectPath || '.',
-              args.siteName
+              args.siteName,
+              args.projectName || null
             )
 
             if (result.success) {
@@ -123,11 +128,19 @@ class MiriDevMCPServer {
               // 사이트 타이틀 결정 (API에서 제공하지 않으면 기본값 사용)
               const siteTitle = result.title || 'Untitled Site'
 
+              const lines = ['배포되었습니다.', `사이트 타이틀 : "${siteTitle}"`]
+              if (result.fixedUrl) {
+                lines.push(`📌 고정 URL: ${result.fixedUrl} (항상 최신 배포)`)
+                lines.push(`배포 URL: ${result.url}`)
+              } else {
+                lines.push(result.url)
+              }
+
               return {
                 content: [
                   {
                     type: 'text',
-                    text: `배포되었습니다.\n사이트 타이틀 : "${siteTitle}"\n${result.url}`,
+                    text: lines.join('\n'),
                   },
                 ],
               }
