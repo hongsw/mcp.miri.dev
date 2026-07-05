@@ -8,11 +8,25 @@ AI와 자연어로 소통하여 miri.dev에 웹사이트를 배포할 수 있는
 ## ✨ 주요 기능
 
 - 🚀 **자연어 배포**: "내 홈페이지를 miri.dev에 배포해줘" 같은 명령으로 배포
-- 🔐 **간편한 인증**: 이메일/비밀번호로 로그인 (CLI 및 MCP 지원)
+- 🔐 **로그인 = 영구 배포**: 로그인 시 배포가 만료되지 않고 유지됩니다 (게스트는 임시)
+- 📌 **프로젝트 고정 URL**: `projectName` 지정 시 `name-shortid.miri.dev` 고정 주소 — 다시 배포해도 같은 URL로 최신본 서빙 (`.miri-project.json` 자동 재사용)
+- 🌐 **내 도메인 연결**: 커스텀 도메인은 **웹(my-page) 또는 CLI**로 신청 (유료 플랜 + 문자인증) → 인증서 자동발급 → DNS 한 줄로 자동 HTTPS
 - 📊 **상태 모니터링**: 배포 상태 및 사이트 목록 확인
-- 🤖 **AI 친화적**: Claude Desktop, ChatGPT 등과 연동
-- 🛠️ **CLI 도구**: 터미널에서 직접 배포 및 관리 가능
-- ✅ **안정성 개선**: 로그인 에러 수정, 테스트 환경 개선
+- 🤖 **AI 친화적**: Claude Desktop, Cursor 등 MCP 호스트와 연동
+- 🛠️ **CLI 도구**: 터미널에서 직접 배포 및 관리 (`miridev deploy` / `miridev domains`)
+
+> 폴더에 `index.html`을 두면 됩니다(HTML 파일이 1개면 자동으로 index 인식). `assets/`, `img/` 같은 **하위 폴더도 그대로 서빙**되니 평탄화할 필요가 없습니다.
+
+## 🔧 MCP 도구
+
+| 도구 | 설명 |
+| --- | --- |
+| `deploy_website(projectPath, siteName?, projectName?)` | 폴더 배포. `projectName` 지정 시 고정 URL |
+| `login_miridev` | 로그인 (영구 배포) |
+| `check_auth_status` | 로그인 상태 확인 |
+| `get_deployment_status` | 최근 배포 상태 |
+
+커스텀 도메인은 MCP 도구가 아니라 웹/CLI로 신청합니다: [miridev-cli](https://www.npmjs.com/package/miridev-cli) `miridev domains add`, 또는 https://www.miri.dev/my-page
 
 ## 🔧 Claude Desktop 설정
 
